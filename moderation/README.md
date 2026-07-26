@@ -2,7 +2,7 @@
 
 Приложение: `app54694462`
 
-Скриншоты 1200×600 JPG в `moderation/assets/`.
+Скриншоты **600×1200** JPG (вертикальная ориентация) в `moderation/assets/`.
 
 ```bash
 pnpm run moderation:assets
