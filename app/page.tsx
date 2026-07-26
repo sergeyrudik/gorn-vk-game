@@ -76,7 +76,11 @@ export default function HomePage() {
   const [hit, setHit] = useState(false);
   const [critHit, setCritHit] = useState(false);
   const [floatText, setFloatText] = useState<string | null>(null);
+  const [floatCrit, setFloatCrit] = useState(false);
   const [offlineBanner, setOfflineBanner] = useState<string | null>(null);
+  const [craftPopup, setCraftPopup] = useState<RecipeId | null>(null);
+  const [heat, setHeat] = useState(0);
+  const [sparking, setSparking] = useState(false);
 
   const [ingots, setIngots] = useState(0);
   const [coal, setCoal] = useState(2);
@@ -98,11 +102,14 @@ export default function HomePage() {
   const upgradesRef = useRef(upgrades);
   const boostRef = useRef(boost);
 
-  const mult = getActiveMultiplier(boost, nowTick);
+  const clock = nowTick || 1;
+  const mult = getActiveMultiplier(boost, clock);
+  const boostLeftSec = Math.max(0, Math.ceil((boost.expiresAt - clock) / 1000));
   const recipes = recipeProgress(crafted);
+  const streakPct = Math.min(100, Math.round((tapStreak % 25) * 4));
   const tutorialText = useMemo(() => {
     if (tutorialDone) return null;
-    if (tutorialStep === 0) return "Бей по наковальне — каждый удар даёт слитки.";
+    if (tutorialStep === 0) return "Бей по наковальне — каждый удар даёт слитки. Серия усиливает доход.";
     if (tutorialStep === 1) return "Купи улучшение в «Цехе» или выкуй нож в «Рецептах».";
     return "Подмастерья копят слитки даже когда ты уходишь — возвращайся за офлайн-доходом.";
   }, [tutorialDone, tutorialStep]);
@@ -297,6 +304,7 @@ export default function HomePage() {
     const id = window.setInterval(() => {
       const now = Date.now();
       setNowTick(now);
+      setHeat((value) => Math.max(0, value - 8));
       const gained = applyAutoTick(upgradesRef.current, boostRef.current, 1, now);
       if (gained > 0) {
         setIngots((value) => value + gained);
@@ -327,6 +335,7 @@ export default function HomePage() {
     const result = applyTap(upgrades, boost, tapStreak);
     setIngots((value) => value + result.gained);
     setTapStreak(result.streak);
+    setHeat((value) => Math.min(100, value + (result.crit ? 18 : 10)));
     setStats((prev) => ({
       ...prev,
       taps: prev.taps + 1,
@@ -339,13 +348,17 @@ export default function HomePage() {
       return { ...fresh, tap: fresh.tap + 1 };
     });
     setFloatText(`+${result.gained}${result.crit ? " КРИТ!" : ""}`);
+    setFloatCrit(result.crit);
     setHit(true);
     setCritHit(result.crit);
+    setSparking(true);
     window.setTimeout(() => {
       setHit(false);
       setCritHit(false);
       setFloatText(null);
-    }, 180);
+      setFloatCrit(false);
+      setSparking(false);
+    }, 220);
     playSound(result.crit ? "crit" : "tap");
     if (!tutorialDone && tutorialStep === 0) setTutorialStep(1);
     void bridgeRef.current
@@ -390,6 +403,7 @@ export default function HomePage() {
       const fresh = refreshDaily(prev);
       return { ...fresh, craft: fresh.craft + 1 };
     });
+    setCraftPopup(id);
     playSound("buy");
     if (!tutorialDone) {
       setTutorialStep(2);
@@ -457,8 +471,16 @@ export default function HomePage() {
     return (
       <div className="app-shell">
         <div className="start-screen">
-          <div>
-            <div className="start-forge" aria-hidden />
+          <div className="start-hero">
+            <div className="start-scene" aria-hidden>
+              <div className="smoke" />
+              <div className="glow" />
+              <div className="ember a" />
+              <div className="ember b" />
+              <div className="ember c" />
+              <div className="hammer-sil" />
+              <div className="anvil-sil" />
+            </div>
             <h1 className="start-brand">Горн</h1>
             <p className="start-tagline">Кузница — вкуй удачу!</p>
             <button type="button" className="start-play" onClick={() => setStarted(true)}>
@@ -497,22 +519,60 @@ export default function HomePage() {
               </button>
             </div>
             {tutorialText && <div className="tutorial-banner">{tutorialText}</div>}
-            <div className="stats-line">
-              <span>Удар: {getTapPower(upgrades)}</span>
-              <span>Крит: {Math.round(getCritChance(upgrades) * 100)}%</span>
-              <span>Авто: {getAutoIncome(upgrades)}/с</span>
-              {mult > 1 && <span className="boost-pill">x{mult}</span>}
+
+            <div className="hud-grid">
+              <div className="hud-cell">
+                <span>Удар</span>
+                <strong>{getTapPower(upgrades)}</strong>
+              </div>
+              <div className="hud-cell">
+                <span>Крит</span>
+                <strong>{Math.round(getCritChance(upgrades) * 100)}%</strong>
+              </div>
+              <div className="hud-cell">
+                <span>Авто</span>
+                <strong>{getAutoIncome(upgrades)}/с</strong>
+              </div>
             </div>
-            <div className="anvil-stage">
-              {floatText && <div className="float-gain">{floatText}</div>}
+
+            {mult > 1 && boostLeftSec > 0 && (
+              <div className="boost-pill">🔥 x{mult} ещё {boostLeftSec}с</div>
+            )}
+
+            <div className={`anvil-stage${heat > 40 ? " hot" : ""}${sparking ? " sparking" : ""}`}>
+              <div className="stage-smoke" />
+              <div className="heat-ring" />
+              <div className="spark-burst s1" />
+              <div className="spark-burst s2" />
+              <div className="spark-burst s3" />
+              <div className="spark-burst s4" />
+              {floatText && <div className={`float-gain${floatCrit ? " crit-text" : ""}`}>{floatText}</div>}
               <button
                 type="button"
                 className={`anvil-btn${hit ? " hit" : ""}${critHit ? " crit" : ""}`}
                 onPointerDown={onTap}
+                aria-label="Ударить по наковальне"
               >
                 🔨
               </button>
             </div>
+
+            <div className="meter-label">
+              <span>Серия · {tapStreak}</span>
+              <span className="auto-pulse">
+                {getAutoIncome(upgrades) > 0 ? (
+                  <>
+                    <i /> куёт
+                  </>
+                ) : (
+                  "найми подмастерьев"
+                )}
+              </span>
+            </div>
+            <div className="streak-bar">
+              <div className="streak-fill" style={{ width: `${streakPct}%` }} />
+            </div>
+
             <div className="btn-row">
               <button type="button" className="btn" onClick={() => void watchRewardAd("boost")}>
                 x2 на минуту за рекламу
@@ -536,7 +596,8 @@ export default function HomePage() {
                   <div key={key} className="card">
                     <div>
                       <h3>
-                        {data.icon} {data.title} · {upgrades[key]}
+                        {data.icon} {data.title}
+                        <span className="upgrade-level">ур. {upgrades[key]}</span>
                       </h3>
                       <p>
                         {data.description}. {data.bonus(upgrades[key])}
@@ -555,9 +616,7 @@ export default function HomePage() {
         {tab === "recipes" && (
           <section className="panel">
             <h2>Рецепты</h2>
-            <p className="muted" style={{ color: "#5a6d5f" }}>
-              Выковано: {recipes.done}/{recipes.total}
-            </p>
+            <p className="muted">Выковано видов: {recipes.done}/{recipes.total}</p>
             <div className="recipe-grid">
               {RECIPE_CATALOG.map((recipe) => {
                 const count = crafted[recipe.id] ?? 0;
@@ -566,15 +625,13 @@ export default function HomePage() {
                   <button
                     key={recipe.id}
                     type="button"
-                    className={`recipe-cell${locked && !count ? " locked" : ""}`}
+                    className={`recipe-cell${locked && !count ? " locked" : ""}${count ? " owned" : ""}`}
                     disabled={locked}
                     onClick={() => craft(recipe.id)}
                   >
                     <span className="icon">{locked && !count ? "❔" : recipe.icon}</span>
                     {locked && !count ? "???" : recipe.name}
-                    <div className="muted" style={{ color: "#5a6d5f" }}>
-                      {count > 0 ? `×${count}` : `${recipe.cost}🪙`}
-                    </div>
+                    <div className="muted">{count > 0 ? `×${count}` : `${recipe.cost}🪙`}</div>
                   </button>
                 );
               })}
@@ -585,21 +642,23 @@ export default function HomePage() {
         {tab === "quests" && (
           <section className="panel">
             <h2>Задания</h2>
-            <p className="muted" style={{ color: "#5a6d5f" }}>
-              {daily.date}
-            </p>
+            <p className="muted">Обновляются каждый день · {daily.date}</p>
             <div className="list">
               {DAILY_QUESTS.map((quest) => {
                 const progress = daily[quest.field];
                 const claimed = daily.claimed.includes(quest.id);
                 const ready = progress >= quest.target && !claimed;
+                const pct = Math.min(100, Math.round((progress / quest.target) * 100));
                 return (
                   <div key={quest.id} className="card">
-                    <div>
+                    <div style={{ flex: 1 }}>
                       <h3>{quest.title}</h3>
                       <p>
                         {quest.description} · {Math.min(progress, quest.target)}/{quest.target}
                       </p>
+                      <div className="quest-bar">
+                        <div className="quest-fill" style={{ width: `${pct}%` }} />
+                      </div>
                     </div>
                     <button type="button" className="btn" disabled={!ready} onClick={() => claimQuest(quest.id)}>
                       {claimed ? "Готово" : ready ? "Забрать" : "Ещё"}
@@ -667,6 +726,25 @@ export default function HomePage() {
         ))}
       </nav>
 
+      {craftPopup && (
+        <div className="overlay craft-overlay" onClick={() => setCraftPopup(null)}>
+          <div className="overlay-card" onClick={(event) => event.stopPropagation()}>
+            <div className="craft-icon">
+              {RECIPE_CATALOG.find((item) => item.id === craftPopup)?.icon ?? "⚒️"}
+            </div>
+            <h3>Выковано!</h3>
+            <p>
+              <strong>{RECIPE_CATALOG.find((item) => item.id === craftPopup)?.name}</strong>
+              <br />
+              Изделие добавлено в коллекцию кузницы.
+            </p>
+            <button type="button" className="btn" onClick={() => setCraftPopup(null)}>
+              В цех
+            </button>
+          </div>
+        </div>
+      )}
+
       {(message || offlineBanner) && (
         <div
           className="overlay"
@@ -675,7 +753,10 @@ export default function HomePage() {
             setOfflineBanner(null);
           }}
         >
-          <div className="overlay-card">
+          <div
+            className="overlay-card"
+            onClick={(event) => event.stopPropagation()}
+          >
             <h3>Горн</h3>
             <p>{message ?? offlineBanner}</p>
             <button
