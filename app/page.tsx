@@ -47,7 +47,7 @@ const VK_SAVE_KEY = "gorn_save";
 const REWARD_COOLDOWN_MS = 3 * 60 * 1000;
 const REWARD_DAILY_LIMIT = 8;
 const INTERSTITIAL_INTERVAL_MS = 3 * 60 * 1000;
-const VK_APP_URL = "https://example.com/";
+const VK_APP_URL = "https://vk.com/app54694462";
 
 const DAILY_QUESTS = [
   { id: "tap", field: "tap" as const, target: 50, title: "Удары молота", description: "Сделай 50 ударов", reward: { ingots: 80 } },

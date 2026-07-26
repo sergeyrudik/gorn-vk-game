@@ -33,8 +33,17 @@ export default function PrivacyPage() {
           <h2>3. Хранение</h2>
           <p>Прогресс хранится в localStorage и VK Storage. Данные профиля не продаются.</p>
         </section>
+        <section>
+          <h2>4. Обращения</h2>
+          <p>
+            Запросы на доступ, исправление или удаление данных направляйте через
+            контакты разработчика на{" "}
+            <a href="https://vk.com/app54694462">странице Игры ВКонтакте</a>.
+          </p>
+        </section>
         <footer className="legal-footer">
           <Link href="/terms/">Пользовательское соглашение</Link>
+          <a href="https://vk.com/app54694462">Страница приложения ВКонтакте</a>
         </footer>
       </article>
     </main>

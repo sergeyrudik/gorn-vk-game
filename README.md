@@ -3,9 +3,11 @@
 Казуальный idle-кликер для VK Mini Apps. Бей по наковальне, копи слитки,
 нанимай подмастерьев и куй оружие.
 
-- VK Mini App: _создайте приложение в кабинете VK_
-- production: _URL Timeweb после деплоя_
+- VK Mini App: [app54694462](https://vk.com/app54694462)
+- production: [sergeyrudik-gorn-vk-game-3385.twc1.net](https://sergeyrudik-gorn-vk-game-3385.twc1.net/)
 - репозиторий: [sergeyrudik/gorn-vk-game](https://github.com/sergeyrudik/gorn-vk-game)
+- политика конфиденциальности: [production/privacy/](https://sergeyrudik-gorn-vk-game-3385.twc1.net/privacy/)
+- пользовательское соглашение: [production/terms/](https://sergeyrudik-gorn-vk-game-3385.twc1.net/terms/)
 
 ## Запуск
 
@@ -30,3 +32,9 @@ pnpm start
 | Сборка | `pnpm run timeweb:build` |
 | Директория | `out` |
 | Запуск | `pnpm run timeweb:start` |
+
+Production URL:
+
+```text
+https://sergeyrudik-gorn-vk-game-3385.twc1.net/
+```

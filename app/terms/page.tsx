@@ -28,6 +28,7 @@ export default function TermsPage() {
         </section>
         <footer className="legal-footer">
           <Link href="/privacy/">Политика конфиденциальности</Link>
+          <a href="https://vk.com/app54694462">Страница приложения ВКонтакте</a>
         </footer>
       </article>
     </main>

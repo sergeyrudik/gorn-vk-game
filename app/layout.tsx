@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://example.com"),
+  metadataBase: new URL("https://sergeyrudik-gorn-vk-game-3385.twc1.net"),
   title: "Горн — кузница",
   description: "Бей по наковальне, копи слитки, нанимай подмастерьев и куй легендарное оружие.",
   alternates: { canonical: "/" },
