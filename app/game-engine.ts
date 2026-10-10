@@ -187,7 +187,7 @@ export function migrateSave(raw: string | null | undefined): GameSave | null {
     }
     return {
       version: 1,
-      updatedAt: clampInt(parsed.updatedAt, Date.now(), 0),
+      updatedAt: clampInt(parsed.updatedAt, Date.now(), 0, Number.MAX_SAFE_INTEGER),
       ingots: clampInt(parsed.ingots, 0, 0),
       coal: clampInt(parsed.coal, base.coal, 0, 9999),
       upgrades: {
@@ -220,12 +220,12 @@ export function migrateSave(raw: string | null | undefined): GameSave | null {
       rewards: {
         date: typeof parsed.rewards?.date === "string" ? parsed.rewards.date : getLocalDateKey(),
         count: clampInt(parsed.rewards?.count, 0),
-        lastRewardAt: clampInt(parsed.rewards?.lastRewardAt, 0),
+        lastRewardAt: clampInt(parsed.rewards?.lastRewardAt, 0, 0, Number.MAX_SAFE_INTEGER),
       },
-      lastActiveAt: clampInt(parsed.lastActiveAt, Date.now(), 0),
+      lastActiveAt: clampInt(parsed.lastActiveAt, Date.now(), 0, Number.MAX_SAFE_INTEGER),
       boost: {
         multiplier: Math.max(1, Number(parsed.boost?.multiplier) || 1),
-        expiresAt: clampInt(parsed.boost?.expiresAt, 0),
+        expiresAt: clampInt(parsed.boost?.expiresAt, 0, 0, Number.MAX_SAFE_INTEGER),
       },
       tapStreak: clampInt(parsed.tapStreak, 0, 0, 999),
     };

@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+html, body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.app-shell, .legal-page, .loading-screen, .start-screen {
+  min-height: 100vh;
+}
+
+.legal-card {
+  overflow-wrap: anywhere;
+}
+
 :root {
   --ink: #1a1410;
   --ember: #e85d04;

@@ -58,3 +58,28 @@ test("save migrate", () => {
   const b = migrateSave(serializeSave({ ...a, updatedAt: 2, ingots: 77 }));
   assert.equal(selectNewestSave(a, b)?.ingots, 77);
 });
+
+
+test("migration preserves timestamps, reward cooldown and newest cloud progress", () => {
+  const now = Date.now();
+  const saved = createDefaultSave();
+  saved.updatedAt = now - 1000;
+  saved.rewards.lastRewardAt = now - 500;
+  const local = migrateSave(JSON.stringify(saved));
+  const cloud = migrateSave(JSON.stringify({ ...saved, updatedAt: now }));
+  assert.equal(local.updatedAt, now - 1000);
+  assert.equal(local.rewards.lastRewardAt, now - 500);
+  assert.equal(selectNewestSave(local, cloud), cloud);
+});
+
+test("migration retains offline activity and active reward boost", () => {
+  const now = Date.now();
+  const saved = createDefaultSave();
+  saved.lastActiveAt = now - 1000;
+  saved.upgrades.apprentice = 5;
+  saved.boost = { multiplier: 2, expiresAt: now + 60000 };
+  const migrated = migrateSave(JSON.stringify(saved));
+  assert.equal(migrated.lastActiveAt, saved.lastActiveAt);
+  assert.deepEqual(migrated.boost, saved.boost);
+  assert.equal(applyOfflineIncome(migrated.upgrades, migrated.lastActiveAt, now).seconds, 1);
+});
