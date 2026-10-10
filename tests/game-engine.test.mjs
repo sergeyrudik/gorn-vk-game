@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  RECIPE_CATALOG,
   applyAutoTick,
   applyOfflineIncome,
   applyTap,
@@ -82,4 +83,35 @@ test("migration retains offline activity and active reward boost", () => {
   assert.equal(migrated.lastActiveAt, saved.lastActiveAt);
   assert.deepEqual(migrated.boost, saved.boost);
   assert.equal(applyOfflineIncome(migrated.upgrades, migrated.lastActiveAt, now).seconds, 1);
+});
+
+
+test("all recipes enforce tap and currency gates and preserve the catalogue after reload", () => {
+  let crafted = {};
+  for (const recipe of RECIPE_CATALOG) {
+    if (recipe.unlockTaps > 0) {
+      assert.equal(craftRecipe(recipe.id, recipe.cost, recipe.unlockTaps - 1, crafted).ok, false);
+    }
+    assert.equal(craftRecipe(recipe.id, recipe.cost - 1, recipe.unlockTaps, crafted).ok, false);
+    const result = craftRecipe(recipe.id, recipe.cost, recipe.unlockTaps, crafted);
+    assert.equal(result.ok, true);
+    assert.equal(result.ingots, 0);
+    crafted = result.crafted;
+  }
+  assert.deepEqual(recipeProgress(crafted), { done: 12, total: 12 });
+  const restored = migrateSave(serializeSave({ ...createDefaultSave(), crafted }));
+  assert.deepEqual(recipeProgress(restored.crafted), { done: 12, total: 12 });
+});
+
+test("boost expiration and offline caps do not create income before apprentices exist", () => {
+  const now = Date.now();
+  const upgrades = createDefaultSave().upgrades;
+  const boost = grantBoost(now, 60000, 2);
+  assert.equal(applyAutoTick(upgrades, boost, 60, now), 0);
+  assert.equal(applyOfflineIncome(upgrades, now - 86400000, now).ingots, 0);
+  const hired = { ...upgrades, apprentice: 2, warehouse: 1 };
+  assert.equal(applyAutoTick(hired, boost, 1, now), 4);
+  assert.equal(applyAutoTick(hired, boost, 1, now + 60000), 2);
+  assert.deepEqual(applyOfflineIncome(hired, now - 86400000, now), { ingots: 18000, seconds: 18000 });
+  assert.deepEqual(applyOfflineIncome(hired, now + 1000, now), { ingots: 0, seconds: 0 });
 });
