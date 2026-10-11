@@ -545,6 +545,12 @@ export default function HomePage() {
                 type="button"
                 className={`anvil-btn${hit ? " hit" : ""}${critHit ? " crit" : ""}`}
                 onPointerDown={onTap}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    if (!event.repeat) void onTap();
+                  }
+                }}
                 aria-label="Ударить по наковальне"
               >
                 🔨
