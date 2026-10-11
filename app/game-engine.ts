@@ -67,6 +67,7 @@ export type GameSave = {
   daily: DailyProgress;
   rewards: RewardLimits;
   lastActiveAt: number;
+  lastAutoTickAt: number;
   boost: BoostState;
   tapStreak: number;
 };
@@ -164,6 +165,7 @@ export function createDefaultSave(): GameSave {
     daily: createDefaultDaily(),
     rewards: createDefaultRewards(),
     lastActiveAt: now,
+    lastAutoTickAt: now,
     boost: { multiplier: 1, expiresAt: 0 },
     tapStreak: 0,
   };
@@ -231,6 +233,7 @@ export function migrateSave(raw: string | null | undefined): GameSave | null {
         lastRewardAt: clampInt(parsed.rewards?.lastRewardAt, 0, 0, Number.MAX_SAFE_INTEGER),
       },
       lastActiveAt: clampInt(parsed.lastActiveAt, Date.now(), 0, Number.MAX_SAFE_INTEGER),
+      lastAutoTickAt: clampInt(parsed.lastAutoTickAt, clampInt(parsed.lastActiveAt, Date.now(), 0, Number.MAX_SAFE_INTEGER), 0, Number.MAX_SAFE_INTEGER),
       boost: {
         multiplier: Math.max(1, Number(parsed.boost?.multiplier) || 1),
         expiresAt: clampInt(parsed.boost?.expiresAt, 0, 0, Number.MAX_SAFE_INTEGER),
@@ -345,4 +348,19 @@ export function refreshRewards(rewards: RewardLimits, date = getLocalDateKey()):
 
 export function grantBoost(now = Date.now(), durationMs = 60_000, multiplier = 2): BoostState {
   return { multiplier, expiresAt: now + durationMs };
+}
+
+// Credit only spendable stock; serialization/migration must not reduce it later.
+export function grantIngots(save: GameSave, requested: number): GameSave {
+  const amount = rewardIngotsAmount(save.ingots, Math.max(0, Math.floor(requested)));
+  return { ...save, ingots: save.ingots + amount,
+    stats: { ...save.stats, ingotsEarned: Math.min(INGOT_CAP, save.stats.ingotsEarned + amount) } };
+}
+
+// Browser timers can be throttled. Use the durable clock so cooperating tabs
+// consume each elapsed second once, preserving the existing per-second formula.
+export function applyElapsedAutoTick(upgrades: Upgrades, boost: BoostState, from: number, now = Date.now()): number {
+  const seconds = Math.min(getOfflineCapHours(upgrades) * 3600, Math.max(0, Math.floor((now - from) / 1000)));
+  const boosted = Math.min(seconds, Math.max(0, Math.floor((boost.expiresAt - from - 1) / 1000)));
+  return applyAutoTick(upgrades, boost, boosted, boost.expiresAt - 1) + applyAutoTick(upgrades, boost, seconds - boosted, Math.max(now, boost.expiresAt));
 }

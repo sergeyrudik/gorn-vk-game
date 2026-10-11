@@ -6,13 +6,14 @@ import { createVkBridge, readStoredValue, writeStoredValue } from "./vk-runtime"
 import Link from "next/link";
 import { createAdPolicy } from "./ad-policy";
 import { attemptEconomyInterstitial, requestEconomyReward } from "./economy-ads";
+import { createSaveCoordinator } from "./save-coordinator";
 import {
-  INGOT_CAP,
   rewardIngotsAmount,
   RECIPE_CATALOG,
   UPGRADE_DATA,
   MAX_UPGRADE_LEVEL,
-  applyAutoTick,
+  applyElapsedAutoTick,
+  grantIngots,
   applyOfflineIncome,
   applyTap,
   createDefaultSave,
@@ -98,7 +99,7 @@ export default function HomePage() {
   const [tutorialStep, setTutorialStep] = useState(0);
   const [stats, setStats] = useState<GameStats>(createDefaultSave().stats);
   const [daily, setDaily] = useState<DailyProgress>(createDefaultSave().daily);
-  const [rewards, setRewards] = useState(createDefaultSave().rewards);
+  const [, setRewards] = useState(createDefaultSave().rewards);
   const [boost, setBoost] = useState<BoostState>({ multiplier: 1, expiresAt: 0 });
   const [tapStreak, setTapStreak] = useState(0);
   const [nowTick, setNowTick] = useState(0);
@@ -106,8 +107,10 @@ export default function HomePage() {
   const bridgeRef = useRef<VKBridge | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const adPolicyRef = useRef<ReturnType<typeof createAdPolicy> | null>(null);
-  const upgradesRef = useRef(upgrades);
-  const boostRef = useRef(boost);
+  const saveRef = useRef<GameSave>(createDefaultSave());
+  const saveCoordinatorRef = useRef<ReturnType<typeof createSaveCoordinator> | null>(null);
+  const resetPendingRef = useRef(false);
+  const incomePauseRef = useRef(false);
 
   const getAdPolicy = useCallback(() => {
     if (!adPolicyRef.current) adPolicyRef.current = createAdPolicy({
@@ -133,13 +136,6 @@ export default function HomePage() {
     if (tutorialStep === 1) return "Купи улучшение в «Цехе» или выкуй нож в «Рецептах».";
     return "Подмастерья копят слитки даже когда ты уходишь — возвращайся за офлайн-доходом.";
   }, [tutorialDone, tutorialStep]);
-
-  useEffect(() => {
-    upgradesRef.current = upgrades;
-  }, [upgrades]);
-  useEffect(() => {
-    boostRef.current = boost;
-  }, [boost]);
 
   const playSound = useCallback(
     (kind: "tap" | "crit" | "buy" | "error") => {
@@ -179,6 +175,7 @@ export default function HomePage() {
 
   const applySave = useCallback((save: GameSave) => {
     getAdPolicy().seedLastAdAt(save.rewards.lastRewardAt);
+    saveRef.current = save;
     setIngots(save.ingots);
     setCoal(save.coal);
     setUpgrades(save.upgrades);
@@ -192,13 +189,48 @@ export default function HomePage() {
     setBoost(save.boost);
     setTapStreak(save.tapStreak);
 
-    const offline = applyOfflineIncome(save.upgrades, save.lastActiveAt);
-    if (offline.ingots > 0) {
-      setIngots((value) => value + offline.ingots);
-      setStats((prev) => ({ ...prev, ingotsEarned: prev.ingotsEarned + offline.ingots }));
-      setOfflineBanner(`Пока тебя не было, подмастерья наковали слитки: +${offline.ingots}`);
-    }
+
   }, [getAdPolicy]);
+
+  const getSaveCoordinator = useCallback(() => {
+    if (!saveCoordinatorRef.current) saveCoordinatorRef.current = createSaveCoordinator({
+      read: () => readStoredValue(SAVE_KEY), write: (value) => writeStoredValue(SAVE_KEY, value),
+      parse: (value) => migrateSave(value) ?? createDefaultSave(), serialize: serializeSave,
+      withLock: async (run) => navigator.locks ? await navigator.locks.request(`${SAVE_KEY}:write`, run) : await run(),
+    });
+    return saveCoordinatorRef.current;
+  }, []);
+
+  const synchronizeSave = useCallback(() => {
+    const external = getSaveCoordinator().refresh();
+    if (external) applySave(external);
+    return external ?? saveRef.current;
+  }, [applySave, getSaveCoordinator]);
+
+  const commitSave = useCallback(async (transform: (current: GameSave) => GameSave | null) => {
+    const result = await getSaveCoordinator().transact(transform);
+    if (result.external) applySave(result.external);
+    if (result.value && (result.localWritten === false || readStoredValue(SAVE_KEY) === result.value)) {
+      void bridgeRef.current?.send("VKWebAppStorageSet", { key: VK_SAVE_KEY, value: result.value }).catch(() => undefined);
+    }
+    return result;
+  }, [applySave, getSaveCoordinator]);
+
+  // Paused/native-ad time used to earn nothing: exclude it when resuming.
+  useEffect(() => {
+    if (paused || interstitialBusy || rewardBusy) { incomePauseRef.current = true; return; }
+    if (!incomePauseRef.current) return;
+    incomePauseRef.current = false;
+    const now = Date.now();
+    void commitSave((current) => ({ ...current, lastActiveAt: now, lastAutoTickAt: now })).catch(() => undefined);
+  }, [paused, interstitialBusy, rewardBusy, commitSave]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const listener = (event: StorageEvent) => { if (event.key === SAVE_KEY || event.key === null) synchronizeSave(); };
+    window.addEventListener("storage", listener);
+    return () => window.removeEventListener("storage", listener);
+  }, [hydrated, synchronizeSave]);
 
   const checkRewardAvailability = useCallback(async () => {
     if (!bridgeRef.current) return;
@@ -215,7 +247,6 @@ export default function HomePage() {
   useEffect(() => {
     let cancelled = false;
     const hydrate = async () => {
-      const localSave = migrateSave(readStoredValue(SAVE_KEY));
       let cloudSave: GameSave | null = null;
       try {
         await promiseWithTimeout(bridge.send("VKWebAppInit"), 1800);
@@ -251,7 +282,16 @@ export default function HomePage() {
         setVkReady(false);
       }
       if (cancelled) return;
-      applySave(selectNewestSave(localSave, cloudSave) ?? createDefaultSave());
+      const raw = readStoredValue(SAVE_KEY);
+      const loaded = selectNewestSave(migrateSave(raw), cloudSave) ?? createDefaultSave();
+      getSaveCoordinator().initialize(raw, loaded);
+      let offline = 0;
+      await commitSave((current) => {
+        const now = Date.now();
+        offline = rewardIngotsAmount(current.ingots, applyOfflineIncome(current.upgrades, current.lastActiveAt, now).ingots);
+        return grantIngots({ ...current, lastActiveAt: now, lastAutoTickAt: now }, offline);
+      });
+      if (offline > 0) setOfflineBanner(`Пока тебя не было, подмастерья наковали слитки: +${offline}`);
       setHydrated(true);
       trackEvent("app_open");
       void checkRewardAvailability();
@@ -260,57 +300,7 @@ export default function HomePage() {
     return () => {
       cancelled = true;
     };
-  }, [applySave, checkRewardAvailability, trackEvent]);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    const timeout = window.setTimeout(() => {
-      const save: GameSave = {
-        version: 1,
-        updatedAt: Date.now(),
-        ingots,
-        coal,
-        upgrades,
-        crafted,
-        sound,
-        tutorialDone,
-        tutorialStep,
-        stats,
-        daily,
-        rewards,
-        lastActiveAt: Date.now(),
-        boost,
-        tapStreak,
-      };
-      const value = serializeSave(save);
-      try {
-        writeStoredValue(SAVE_KEY, value);
-      } catch {
-        trackEvent("save_write_error", { source: "local" });
-      }
-      if (bridgeRef.current) {
-        void bridgeRef.current
-          .send("VKWebAppStorageSet", { key: VK_SAVE_KEY, value })
-          .catch(() => trackEvent("save_write_error", { source: "vk" }));
-      }
-    }, 250);
-    return () => window.clearTimeout(timeout);
-  }, [
-    hydrated,
-    ingots,
-    coal,
-    upgrades,
-    crafted,
-    sound,
-    tutorialDone,
-    tutorialStep,
-    stats,
-    daily,
-    rewards,
-    boost,
-    tapStreak,
-    trackEvent,
-  ]);
+  }, [commitSave, getSaveCoordinator, checkRewardAvailability, trackEvent]);
 
   useEffect(() => {
     const handler = (event: VKEvent) => {
@@ -324,18 +314,18 @@ export default function HomePage() {
   useEffect(() => {
     if (!hydrated || paused) return;
     const id = window.setInterval(() => {
-      if (getAdPolicy().isBusy()) return;
       const now = Date.now();
       setNowTick(now);
       setHeat((value) => Math.max(0, value - 8));
-      const gained = applyAutoTick(upgradesRef.current, boostRef.current, 1, now);
-      if (gained > 0) {
-        setIngots((value) => value + gained);
-        setStats((prev) => ({ ...prev, ingotsEarned: prev.ingotsEarned + gained }));
-      }
+      if (getAdPolicy().isBusy() || resetPendingRef.current) return;
+      void commitSave((current) => {
+        if (now - current.lastAutoTickAt < 1000) return null;
+        const gained = applyElapsedAutoTick(current.upgrades, current.boost, current.lastAutoTickAt, now);
+        return grantIngots({ ...current, lastActiveAt: now, lastAutoTickAt: now }, gained);
+      }).catch(() => undefined);
     }, 1000);
     return () => window.clearInterval(id);
-  }, [hydrated, paused, getAdPolicy]);
+  }, [hydrated, paused, getAdPolicy, commitSave]);
 
   const maybeShowInterstitial = useCallback(async () => {
     const client = bridgeRef.current;
@@ -354,119 +344,84 @@ export default function HomePage() {
     void maybeShowInterstitial();
   };
 
-  const onTap = () => {
-    if (paused || getAdPolicy().isBusy()) return;
+  const onTap = async () => {
+    if (paused || getAdPolicy().isBusy() || resetPendingRef.current) return;
     getAdPolicy().startGameplay();
-    const result = applyTap(upgrades, boost, tapStreak);
-    setIngots((value) => value + result.gained);
-    setTapStreak(result.streak);
+    let result = { gained: 0, crit: false, streak: 0 };
+    await commitSave((current) => {
+      result = applyTap(current.upgrades, current.boost, current.tapStreak);
+      result.gained = rewardIngotsAmount(current.ingots, result.gained);
+      const daily = refreshDaily(current.daily);
+      return grantIngots({ ...current, lastActiveAt: Date.now(), tapStreak: result.streak,
+        tutorialStep: current.tutorialDone ? current.tutorialStep : Math.max(1, current.tutorialStep),
+        stats: { ...current.stats, taps: current.stats.taps + 1, crits: current.stats.crits + (result.crit ? 1 : 0), bestStreak: Math.max(current.stats.bestStreak, result.streak) },
+        daily: { ...daily, tap: daily.tap + 1 },
+      }, result.gained);
+    });
     setHeat((value) => Math.min(100, value + (result.crit ? 18 : 10)));
-    setStats((prev) => ({
-      ...prev,
-      taps: prev.taps + 1,
-      crits: prev.crits + (result.crit ? 1 : 0),
-      ingotsEarned: prev.ingotsEarned + result.gained,
-      bestStreak: Math.max(prev.bestStreak, result.streak),
-    }));
-    setDaily((prev) => {
-      const fresh = refreshDaily(prev);
-      return { ...fresh, tap: fresh.tap + 1 };
-    });
-    setFloatText(`+${result.gained}${result.crit ? " КРИТ!" : ""}`);
-    setFloatCrit(result.crit);
-    setHit(true);
-    setCritHit(result.crit);
-    setSparking(true);
-    window.setTimeout(() => {
-      setHit(false);
-      setCritHit(false);
-      setFloatText(null);
-      setFloatCrit(false);
-      setSparking(false);
-    }, 220);
+    setFloatText(`+${result.gained}${result.crit ? " КРИТ!" : ""}`); setFloatCrit(result.crit);
+    setHit(true); setCritHit(result.crit); setSparking(true);
+    window.setTimeout(() => { setHit(false); setCritHit(false); setFloatText(null); setFloatCrit(false); setSparking(false); }, 220);
     playSound(result.crit ? "crit" : "tap");
-    if (!tutorialDone && tutorialStep === 0) setTutorialStep(1);
-    void bridgeRef.current
-      ?.send("VKWebAppTapticNotificationOccurred", { type: result.crit ? "success" : "warning" })
-      .catch(() => undefined);
+    void bridgeRef.current?.send("VKWebAppTapticNotificationOccurred", { type: result.crit ? "success" : "warning" }).catch(() => undefined);
   };
 
-  const buyUpgrade = (key: UpgradeKey) => {
-    if (paused || getAdPolicy().isBusy()) return;
-    if (upgrades[key] >= MAX_UPGRADE_LEVEL) {
-      setMessage("Максимальный уровень улучшения");
-      return;
-    }
+  const buyUpgrade = async (key: UpgradeKey) => {
+    if (paused || getAdPolicy().isBusy() || resetPendingRef.current) return;
     getAdPolicy().startGameplay();
-    const coalCost = getUpgradeCost(upgrades[key]);
-    const ingotCost = getUpgradeIngotCost(key, upgrades[key]);
-    if (coal < coalCost || ingots < ingotCost) {
-      setMessage("Не хватает слитков или угля");
-      playSound("error");
-      return;
-    }
-    setCoal((value) => value - coalCost);
-    setIngots((value) => value - ingotCost);
-    setUpgrades((prev) => ({ ...prev, [key]: prev[key] + 1 }));
-    setDaily((prev) => {
-      const fresh = refreshDaily(prev);
-      return { ...fresh, upgrade: fresh.upgrade + 1 };
+    let reason = "Не хватает слитков или угля";
+    const result = await commitSave((current) => {
+      const level = current.upgrades[key];
+      if (level >= MAX_UPGRADE_LEVEL) { reason = "Максимальный уровень улучшения"; return null; }
+      const coalCost = getUpgradeCost(level), ingotCost = getUpgradeIngotCost(key, level);
+      if (current.coal < coalCost || current.ingots < ingotCost) return null;
+      const daily = refreshDaily(current.daily);
+      return { ...current, coal: current.coal - coalCost, ingots: current.ingots - ingotCost,
+        upgrades: { ...current.upgrades, [key]: level + 1 }, daily: { ...daily, upgrade: daily.upgrade + 1 }, tutorialDone: true, tutorialStep: 2, lastActiveAt: Date.now() };
     });
-    playSound("buy");
-    if (!tutorialDone) {
-      setTutorialStep(2);
-      setTutorialDone(true);
-    }
-    trackEvent("upgrade_buy", { key });
+    if (!result.value) { setMessage(reason); playSound("error"); return; }
+    playSound("buy"); trackEvent("upgrade_buy", { key });
   };
 
-  const craft = (id: RecipeId) => {
-    if (paused || getAdPolicy().isBusy()) return;
+  const craft = async (id: RecipeId) => {
+    if (paused || getAdPolicy().isBusy() || resetPendingRef.current) return;
     getAdPolicy().startGameplay();
-    const result = craftRecipe(id, ingots, stats.taps, crafted);
-    if (!result.ok) {
-      setMessage("Рецепт недоступен или мало слитков");
-      playSound("error");
-      return;
-    }
-    setIngots(result.ingots);
-    setCrafted(result.crafted);
-    setStats((prev) => ({ ...prev, crafted: prev.crafted + 1 }));
-    setDaily((prev) => {
-      const fresh = refreshDaily(prev);
-      return { ...fresh, craft: fresh.craft + 1 };
+    const result = await commitSave((current) => {
+      const made = craftRecipe(id, current.ingots, current.stats.taps, current.crafted);
+      if (!made.ok) return null;
+      const daily = refreshDaily(current.daily);
+      return { ...current, ingots: made.ingots, crafted: made.crafted, stats: { ...current.stats, crafted: current.stats.crafted + 1 },
+        daily: { ...daily, craft: daily.craft + 1 }, tutorialDone: true, tutorialStep: 2, lastActiveAt: Date.now() };
     });
-    setCraftPopup(id);
-    playSound("buy");
-    if (!tutorialDone) {
-      setTutorialStep(2);
-      setTutorialDone(true);
-    }
+    if (!result.value) { setMessage("Рецепт недоступен или мало слитков"); playSound("error"); return; }
+    setCraftPopup(id); playSound("buy");
   };
 
-  const claimQuest = (id: string) => {
-    if (paused || getAdPolicy().isBusy()) return;
+  const claimQuest = async (id: string) => {
+    if (paused || getAdPolicy().isBusy() || resetPendingRef.current) return;
     const quest = DAILY_QUESTS.find((item) => item.id === id);
     if (!quest) return;
-    const fresh = refreshDaily(daily);
-    if (fresh.claimed.includes(id) || fresh[quest.field] < quest.target) return;
-    setDaily({ ...fresh, claimed: [...fresh.claimed, id] });
-    if (quest.reward.ingots) setIngots((value) => value + quest.reward.ingots!);
-    if (quest.reward.coal) setCoal((value) => value + quest.reward.coal!);
+    await commitSave((current) => {
+      const daily = refreshDaily(current.daily);
+      if (daily.claimed.includes(id) || daily[quest.field] < quest.target) return null;
+      return grantIngots({ ...current, coal: Math.min(9999, current.coal + (quest.reward.coal ?? 0)), daily: { ...daily, claimed: [...daily.claimed, id] }, lastActiveAt: Date.now() }, quest.reward.ingots ?? 0);
+    });
   };
 
-  const resetProgress = () => {
-    const fresh = createDefaultSave();
-    fresh.rewards = refreshRewards(rewards);
-    applySave(fresh);
-    setStarted(false);
-    setOfflineBanner(null);
-    setMessage("Прогресс сброшен");
+  const resetProgress = async () => {
+    if (getAdPolicy().isBusy() || resetPendingRef.current) return;
+    resetPendingRef.current = true;
+    try {
+      await commitSave((current) => { const fresh = createDefaultSave(); fresh.rewards = refreshRewards(current.rewards); return fresh; });
+      setStarted(false); setCraftPopup(null); setOfflineBanner(null); setMessage("Прогресс сброшен");
+    } finally { resetPendingRef.current = false; }
   };
 
   const watchRewardAd = async (kind: "boost" | "ingots") => {
+    if (paused || getAdPolicy().isBusy() || resetPendingRef.current) return;
     const client = bridgeRef.current;
-    const fresh = refreshRewards(rewards);
+    const current = synchronizeSave();
+    const fresh = refreshRewards(current.rewards);
     const result = await requestEconomyReward({
       policy: getAdPolicy(),
       send: (method, params) => client!.send(method, params),
@@ -475,22 +430,19 @@ export default function HomePage() {
       lastRewardAt: fresh.lastRewardAt,
       dailyLimit: REWARD_DAILY_LIMIT,
       cooldownMs: REWARD_COOLDOWN_MS,
-      rewardValue: kind === "boost" ? 1 : rewardIngotsAmount(ingots),
+      rewardValue: kind === "boost" ? 1 : rewardIngotsAmount(current.ingots),
       onBusyChange: setRewardBusy,
-      onGranted: (watchedAt, amount) => {
-        setRewards((prev) => {
-          const completed = refreshRewards(prev);
-          return { date: completed.date, count: completed.count + 1, lastRewardAt: watchedAt };
+      onGranted: async (watchedAt, amount) => {
+        let actualAmount = amount;
+        await commitSave((saved) => {
+          const quota = refreshRewards(saved.rewards);
+          const next = { ...saved, rewards: { ...quota, count: quota.count + 1, lastRewardAt: watchedAt }, stats: { ...saved.stats, adsWatched: saved.stats.adsWatched + 1 }, lastActiveAt: watchedAt, lastAutoTickAt: watchedAt };
+          if (kind === "boost") return { ...next, boost: grantBoost(watchedAt, 60_000, 2) };
+          actualAmount = rewardIngotsAmount(saved.ingots, amount);
+          return grantIngots(next, actualAmount);
         });
-        setStats((prev) => ({ ...prev, adsWatched: prev.adsWatched + 1 }));
-        if (kind === "boost") {
-          setBoost(grantBoost(watchedAt, 60_000, 2));
-          setNowTick(watchedAt);
-          setMessage("x2 к доходу на 60 секунд");
-        } else {
-          setIngots((value) => Math.min(INGOT_CAP, value + amount));
-          setMessage(`Слитки за рекламу: +${amount}`);
-        }
+        if (kind === "boost") { setNowTick(watchedAt); setMessage("x2 к доходу на 60 секунд"); }
+        else setMessage(actualAmount > 0 ? `Слитки за рекламу: +${actualAmount}` : "Запас слитков полон");
       },
     });
     if (result === "wait") setMessage("Подождите немного");
@@ -556,7 +508,7 @@ export default function HomePage() {
           <section className="panel">
             <div className="topbar" style={{ marginBottom: 8 }}>
               <h2 style={{ margin: 0 }}>Горн</h2>
-              <button type="button" className="btn secondary" onClick={() => setSound((value) => !value)}>
+              <button type="button" className="btn secondary" onClick={() => void commitSave((current) => ({ ...current, sound: !current.sound }))}>
                 {sound ? "🔊" : "🔇"}
               </button>
             </div>
