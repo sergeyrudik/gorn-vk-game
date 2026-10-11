@@ -114,7 +114,13 @@ export const RECIPE_CATALOG: RecipeDef[] = [
   { id: "fire_heart", name: "Сердце горна", icon: "🔥", cost: 4000, unlockTaps: 1200 },
 ];
 
-function clampInt(value: unknown, fallback: number, min = 0, max = 1_000_000_000): number {
+export const INGOT_CAP = 1_000_000_000;
+
+export function rewardIngotsAmount(ingots: number, requested = 100): number {
+  return Math.min(requested, Math.max(0, INGOT_CAP - Math.floor(ingots)));
+}
+
+function clampInt(value: unknown, fallback: number, min = 0, max = INGOT_CAP): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(n)));
@@ -332,7 +338,7 @@ export function refreshDaily(daily: DailyProgress, date = getLocalDateKey()): Da
 
 export function refreshRewards(rewards: RewardLimits, date = getLocalDateKey()): RewardLimits {
   if (rewards.date === date) return rewards;
-  return createDefaultRewards(date);
+  return { ...createDefaultRewards(date), lastRewardAt: rewards.lastRewardAt };
 }
 
 export function grantBoost(now = Date.now(), durationMs = 60_000, multiplier = 2): BoostState {

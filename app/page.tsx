@@ -4,7 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import bridge from "@vkontakte/vk-bridge";
 import { createVkBridge, readStoredValue, writeStoredValue } from "./vk-runtime";
 import Link from "next/link";
+import { createAdPolicy } from "./ad-policy";
+import { attemptEconomyInterstitial, requestEconomyReward } from "./economy-ads";
 import {
+  INGOT_CAP,
+  rewardIngotsAmount,
   RECIPE_CATALOG,
   UPGRADE_DATA,
   applyAutoTick,
@@ -47,7 +51,6 @@ const SAVE_KEY = "gorn-save-v1";
 const VK_SAVE_KEY = "gorn_save";
 const REWARD_COOLDOWN_MS = 3 * 60 * 1000;
 const REWARD_DAILY_LIMIT = 8;
-const INTERSTITIAL_INTERVAL_MS = 3 * 60 * 1000;
 const VK_APP_URL = "https://vk.com/app54694462";
 
 const DAILY_QUESTS = [
@@ -73,6 +76,8 @@ export default function HomePage() {
   const [vkUser, setVkUser] = useState<VKUser | null>(null);
   const [paused, setPaused] = useState(false);
   const [adAvailable, setAdAvailable] = useState(false);
+  const [interstitialBusy, setInterstitialBusy] = useState(false);
+  const [rewardBusy, setRewardBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [hit, setHit] = useState(false);
   const [critHit, setCritHit] = useState(false);
@@ -99,10 +104,23 @@ export default function HomePage() {
 
   const bridgeRef = useRef<VKBridge | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const lastInterstitialRef = useRef(0);
+  const adPolicyRef = useRef<ReturnType<typeof createAdPolicy> | null>(null);
   const upgradesRef = useRef(upgrades);
   const boostRef = useRef(boost);
 
+  const getAdPolicy = useCallback(() => {
+    if (!adPolicyRef.current) adPolicyRef.current = createAdPolicy({
+      storageKey: "gorn:ad-policy:v1",
+      onInterstitialBusyChange: setInterstitialBusy,
+    });
+    return adPolicyRef.current;
+  }, []);
+
+  useEffect(() => {
+    if (hydrated && started) getAdPolicy().startGameplay();
+  }, [hydrated, started, getAdPolicy]);
+
+  const rewardIngots = rewardIngotsAmount(ingots);
   const clock = nowTick || 1;
   const mult = getActiveMultiplier(boost, clock);
   const boostLeftSec = Math.max(0, Math.ceil((boost.expiresAt - clock) / 1000));
@@ -159,6 +177,7 @@ export default function HomePage() {
   }, []);
 
   const applySave = useCallback((save: GameSave) => {
+    getAdPolicy().seedLastAdAt(save.rewards.lastRewardAt);
     setIngots(save.ingots);
     setCoal(save.coal);
     setUpgrades(save.upgrades);
@@ -176,9 +195,9 @@ export default function HomePage() {
     if (offline.ingots > 0) {
       setIngots((value) => value + offline.ingots);
       setStats((prev) => ({ ...prev, ingotsEarned: prev.ingotsEarned + offline.ingots }));
-      setOfflineBanner(`Пока тебя не было, подмастерья наковали +${offline.ingots} слитков`);
+      setOfflineBanner(`Пока тебя не было, подмастерья наковали слитки: +${offline.ingots}`);
     }
-  }, []);
+  }, [getAdPolicy]);
 
   const checkRewardAvailability = useCallback(async () => {
     if (!bridgeRef.current) return;
@@ -304,6 +323,7 @@ export default function HomePage() {
   useEffect(() => {
     if (!hydrated || paused) return;
     const id = window.setInterval(() => {
+      if (getAdPolicy().isBusy()) return;
       const now = Date.now();
       setNowTick(now);
       setHeat((value) => Math.max(0, value - 8));
@@ -314,26 +334,28 @@ export default function HomePage() {
       }
     }, 1000);
     return () => window.clearInterval(id);
-  }, [hydrated, paused]);
+  }, [hydrated, paused, getAdPolicy]);
 
   const maybeShowInterstitial = useCallback(async () => {
-    if (!bridgeRef.current) return;
-    const now = Date.now();
-    if (now - lastInterstitialRef.current < INTERSTITIAL_INTERVAL_MS) return;
-    try {
-      const check = (await bridgeRef.current.send("VKWebAppCheckNativeAds", {
-        ad_format: "interstitial",
-      })) as { result?: boolean };
-      if (!check.result) return;
-      await bridgeRef.current.send("VKWebAppShowNativeAds", { ad_format: "interstitial" });
-      lastInterstitialRef.current = now;
-    } catch {
-      // optional
-    }
-  }, []);
+    const client = bridgeRef.current;
+    if (!client || !started) return false;
+    return attemptEconomyInterstitial(getAdPolicy(), "gorn", "craft-finished", {
+      send: (method, params) => client.send(method, params),
+      ready: vkReady,
+      paused,
+      phase: "idle",
+    });
+  }, [getAdPolicy, paused, started, vkReady]);
+
+  const closeCraftPopup = () => {
+    if (!craftPopup || paused || getAdPolicy().isBusy()) return;
+    setCraftPopup(null);
+    void maybeShowInterstitial();
+  };
 
   const onTap = () => {
-    if (paused) return;
+    if (paused || getAdPolicy().isBusy()) return;
+    getAdPolicy().startGameplay();
     const result = applyTap(upgrades, boost, tapStreak);
     setIngots((value) => value + result.gained);
     setTapStreak(result.streak);
@@ -369,6 +391,8 @@ export default function HomePage() {
   };
 
   const buyUpgrade = (key: UpgradeKey) => {
+    if (paused || getAdPolicy().isBusy()) return;
+    getAdPolicy().startGameplay();
     const coalCost = getUpgradeCost(upgrades[key]);
     const ingotCost = getUpgradeIngotCost(key, upgrades[key]);
     if (coal < coalCost || ingots < ingotCost) {
@@ -392,6 +416,8 @@ export default function HomePage() {
   };
 
   const craft = (id: RecipeId) => {
+    if (paused || getAdPolicy().isBusy()) return;
+    getAdPolicy().startGameplay();
     const result = craftRecipe(id, ingots, stats.taps, crafted);
     if (!result.ok) {
       setMessage("Рецепт недоступен или мало слитков");
@@ -411,10 +437,10 @@ export default function HomePage() {
       setTutorialStep(2);
       setTutorialDone(true);
     }
-    void maybeShowInterstitial();
   };
 
   const claimQuest = (id: string) => {
+    if (paused || getAdPolicy().isBusy()) return;
     const quest = DAILY_QUESTS.find((item) => item.id === id);
     if (!quest) return;
     const fresh = refreshDaily(daily);
@@ -425,44 +451,38 @@ export default function HomePage() {
   };
 
   const watchRewardAd = async (kind: "boost" | "ingots") => {
-    if (!bridgeRef.current || !adAvailable) {
-      setMessage("Реклама пока недоступна");
-      void checkRewardAvailability();
-      return;
-    }
+    const client = bridgeRef.current;
     const fresh = refreshRewards(rewards);
-    const now = Date.now();
-    if (fresh.count >= REWARD_DAILY_LIMIT) {
-      setMessage("Дневной лимит наград исчерпан");
-      return;
-    }
-    if (now - fresh.lastRewardAt < REWARD_COOLDOWN_MS) {
-      setMessage("Подождите немного");
-      return;
-    }
-    if (bridgeRef.current && adAvailable) {
-      try {
-        const response = (await bridgeRef.current.send("VKWebAppShowNativeAds", {
-          ad_format: "reward",
-        })) as { result?: boolean };
-        if (response.result !== true) {
-          setMessage("Реклама недоступна");
-          return;
+    const result = await requestEconomyReward({
+      policy: getAdPolicy(),
+      send: (method, params) => client!.send(method, params),
+      available: Boolean(client) && adAvailable,
+      count: fresh.count,
+      lastRewardAt: fresh.lastRewardAt,
+      dailyLimit: REWARD_DAILY_LIMIT,
+      cooldownMs: REWARD_COOLDOWN_MS,
+      rewardValue: kind === "boost" ? 1 : rewardIngotsAmount(ingots),
+      onBusyChange: setRewardBusy,
+      onGranted: (watchedAt, amount) => {
+        setRewards((prev) => {
+          const completed = refreshRewards(prev);
+          return { date: completed.date, count: completed.count + 1, lastRewardAt: watchedAt };
+        });
+        setStats((prev) => ({ ...prev, adsWatched: prev.adsWatched + 1 }));
+        if (kind === "boost") {
+          setBoost(grantBoost(watchedAt, 60_000, 2));
+          setNowTick(watchedAt);
+          setMessage("x2 к доходу на 60 секунд");
+        } else {
+          setIngots((value) => Math.min(INGOT_CAP, value + amount));
+          setMessage(`Слитки за рекламу: +${amount}`);
         }
-      } catch {
-        setMessage("Не удалось показать рекламу");
-        return;
-      }
-    }
-    setRewards({ date: fresh.date, count: fresh.count + 1, lastRewardAt: now });
-    setStats((prev) => ({ ...prev, adsWatched: prev.adsWatched + 1 }));
-    if (kind === "boost") {
-      setBoost(grantBoost(now, 60_000, 2));
-      setMessage("x2 к доходу на 60 секунд");
-    } else {
-      setIngots((value) => value + 100);
-      setMessage("+100 слитков");
-    }
+      },
+    });
+    if (result === "wait") setMessage("Подождите немного");
+    if (result === "daily-limit") setMessage("Дневной лимит наград исчерпан");
+    if (result === "no-value") setMessage("Запас слитков полон");
+    if (result === "unavailable") setMessage("Реклама пока недоступна");
     void checkRewardAvailability();
   };
 
@@ -489,7 +509,7 @@ export default function HomePage() {
               <div className="anvil-sil" />
             </div>
             <h1 className="start-brand">Горн</h1>
-            <p className="start-tagline">Кузница — вкуй удачу!</p>
+            <p className="start-tagline">Кузница — выкуй удачу!</p>
             <button type="button" className="start-play" onClick={() => setStarted(true)}>
               К горну
             </button>
@@ -505,6 +525,7 @@ export default function HomePage() {
 
   return (
     <div className="app-shell">
+      <fieldset disabled={interstitialBusy || rewardBusy} style={{ display: "contents" }}>
       <div className="game-frame">
         <header className="topbar">
           <div>
@@ -584,8 +605,8 @@ export default function HomePage() {
               <button type="button" className="btn" onClick={() => void watchRewardAd("boost")}>
                 x2 на минуту за рекламу
               </button>
-              <button type="button" className="btn secondary" onClick={() => void watchRewardAd("ingots")}>
-                +100 слитков за рекламу
+              <button type="button" className="btn secondary" disabled={rewardIngots === 0} onClick={() => void watchRewardAd("ingots")}>
+                {rewardIngots > 0 ? `Слитки за рекламу: +${rewardIngots}` : "Запас слитков полон"}
               </button>
             </div>
           </section>
@@ -734,7 +755,7 @@ export default function HomePage() {
       </nav>
 
       {craftPopup && (
-        <div className="overlay craft-overlay" onClick={() => setCraftPopup(null)}>
+        <div className="overlay craft-overlay" onClick={closeCraftPopup}>
           <div className="overlay-card" onClick={(event) => event.stopPropagation()}>
             <div className="craft-icon">
               {RECIPE_CATALOG.find((item) => item.id === craftPopup)?.icon ?? "⚒️"}
@@ -745,7 +766,7 @@ export default function HomePage() {
               <br />
               Изделие добавлено в коллекцию кузницы.
             </p>
-            <button type="button" className="btn" onClick={() => setCraftPopup(null)}>
+            <button type="button" className="btn" onClick={closeCraftPopup}>
               В цех
             </button>
           </div>
@@ -779,6 +800,7 @@ export default function HomePage() {
           </div>
         </div>
       )}
+      </fieldset>
     </div>
   );
 }
