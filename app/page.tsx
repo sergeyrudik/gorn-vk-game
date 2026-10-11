@@ -11,6 +11,7 @@ import {
   rewardIngotsAmount,
   RECIPE_CATALOG,
   UPGRADE_DATA,
+  MAX_UPGRADE_LEVEL,
   applyAutoTick,
   applyOfflineIncome,
   applyTap,
@@ -392,6 +393,10 @@ export default function HomePage() {
 
   const buyUpgrade = (key: UpgradeKey) => {
     if (paused || getAdPolicy().isBusy()) return;
+    if (upgrades[key] >= MAX_UPGRADE_LEVEL) {
+      setMessage("Максимальный уровень улучшения");
+      return;
+    }
     getAdPolicy().startGameplay();
     const coalCost = getUpgradeCost(upgrades[key]);
     const ingotCost = getUpgradeIngotCost(key, upgrades[key]);
@@ -448,6 +453,15 @@ export default function HomePage() {
     setDaily({ ...fresh, claimed: [...fresh.claimed, id] });
     if (quest.reward.ingots) setIngots((value) => value + quest.reward.ingots!);
     if (quest.reward.coal) setCoal((value) => value + quest.reward.coal!);
+  };
+
+  const resetProgress = () => {
+    const fresh = createDefaultSave();
+    fresh.rewards = refreshRewards(rewards);
+    applySave(fresh);
+    setStarted(false);
+    setOfflineBanner(null);
+    setMessage("Прогресс сброшен");
   };
 
   const watchRewardAd = async (kind: "boost" | "ingots") => {
@@ -631,8 +645,8 @@ export default function HomePage() {
                         {data.description}. {data.bonus(upgrades[key])}
                       </p>
                     </div>
-                    <button type="button" className="btn" onClick={() => buyUpgrade(key)}>
-                      {ingotCost}🪙 / {coalCost}🪨
+                    <button type="button" className="btn" disabled={upgrades[key] >= MAX_UPGRADE_LEVEL} onClick={() => buyUpgrade(key)}>
+                      {upgrades[key] >= MAX_UPGRADE_LEVEL ? "Максимум" : `${ingotCost}🪙 / ${coalCost}🪨`}
                     </button>
                   </div>
                 );
@@ -720,12 +734,7 @@ export default function HomePage() {
               <button
                 type="button"
                 className="btn danger"
-                onClick={() => {
-                  applySave(createDefaultSave());
-                  setStarted(false);
-                  setOfflineBanner(null);
-                  setMessage("Прогресс сброшен");
-                }}
+                onClick={resetProgress}
               >
                 Сбросить прогресс
               </button>

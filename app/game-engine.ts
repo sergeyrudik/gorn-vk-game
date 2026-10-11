@@ -1,3 +1,5 @@
+export const MAX_UPGRADE_LEVEL = 50;
+
 export type UpgradeKey = "hammer" | "bellows" | "apprentice" | "warehouse";
 export type RecipeId =
   | "knife"
@@ -197,10 +199,10 @@ export function migrateSave(raw: string | null | undefined): GameSave | null {
       ingots: clampInt(parsed.ingots, 0, 0),
       coal: clampInt(parsed.coal, base.coal, 0, 9999),
       upgrades: {
-        hammer: clampInt(parsed.upgrades?.hammer, 0, 0, 50),
-        bellows: clampInt(parsed.upgrades?.bellows, 0, 0, 50),
-        apprentice: clampInt(parsed.upgrades?.apprentice, 0, 0, 50),
-        warehouse: clampInt(parsed.upgrades?.warehouse, 0, 0, 50),
+        hammer: clampInt(parsed.upgrades?.hammer, 0, 0, MAX_UPGRADE_LEVEL),
+        bellows: clampInt(parsed.upgrades?.bellows, 0, 0, MAX_UPGRADE_LEVEL),
+        apprentice: clampInt(parsed.upgrades?.apprentice, 0, 0, MAX_UPGRADE_LEVEL),
+        warehouse: clampInt(parsed.upgrades?.warehouse, 0, 0, MAX_UPGRADE_LEVEL),
       },
       crafted,
       sound: parsed.sound !== false,
